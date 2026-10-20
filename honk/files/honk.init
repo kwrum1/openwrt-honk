@@ -9,6 +9,50 @@ STOP=10
 HONK_CONTROL=/usr/share/honk/control.sh
 HONK_CONFIG=/etc/honk/config.dae
 
+# honk-core creates dae0/dae0peer (netkit pair) plus the daens netns, and
+# removes them itself on SIGTERM -- but only after it has detached its eBPF
+# hooks, which takes longer than procd needs to consider the service stopped.
+# Measured 2026-10-20: /etc/init.d/honk stop returns in ~30 ms, honk-core logs
+# "Cleaning up dae0 side effects" about a second later. A UI restart issues
+# stop; start back to back, so start used to run while dae0 was still there and
+# control.sh refused with "dae0 already exists" -- after which the service was
+# down and every later start failed the same way. Nothing cleaned up the
+# leftovers because the core that owned them was already gone.
+honk_core_running() {
+	pgrep -f /usr/bin/honk-core >/dev/null 2>&1
+}
+
+honk_cleanup_stale() {
+	local link
+
+	# Never touch the datapath of a live instance: only a core that is gone
+	# can leave these behind.
+	honk_core_running && return 0
+
+	for link in dae0 dae0peer; do
+		if ip link show "$link" >/dev/null 2>&1; then
+			ip link del "$link" 2>/dev/null &&
+				logger -t honk "removed stale $link left by a previous instance"
+		fi
+	done
+	if ip netns list 2>/dev/null | awk '{print $1}' | grep -qx daens; then
+		ip netns del daens 2>/dev/null &&
+			logger -t honk "removed stale daens namespace left by a previous instance"
+	fi
+	return 0
+}
+
+honk_wait_core_exit() {
+	local i=0
+
+	while [ "$i" -lt 20 ]; do
+		honk_core_running || return 0
+		sleep 1
+		i=$((i + 1))
+	done
+	return 1
+}
+
 boot() {
 	local boot_enabled
 	config_load honk
@@ -33,7 +77,15 @@ start_service() {
 		logger -t honk "refusing non-default config path"
 		return 1
 	}
-	"$HONK_CONTROL" preflight || return 1
+	# Reap a half-dead datapath before the preflight looks at it. Skip this
+	# while honk-core is alive: that would delete the running instance's links.
+	honk_cleanup_stale
+	"$HONK_CONTROL" preflight || {
+		# A leftover that appeared between our check and the preflight
+		# (e.g. a core that exited right then) still gets cleaned once.
+		honk_cleanup_stale
+		return 1
+	}
 	unset HONK_MAINT_CAP
 
 	procd_open_instance main
@@ -44,6 +96,26 @@ start_service() {
 	procd_set_param respawn 3600 5 5
 	procd_set_param term_timeout 20
 	procd_close_instance
+}
+
+stop_service() {
+	# rc.common calls procd_kill() right after this hook, so the process is
+	# still alive here. The real drain happens in service_stopped(), which
+	# runs once the signal has been delivered. Kept explicit so the split is
+	# not mistaken for a missing stop hook.
+	:
+}
+
+service_stopped() {
+	# procd considers the instance stopped as soon as it has signalled it,
+	# not when honk-core has finished tearing down eBPF and dae0. Wait for
+	# the process to really exit (bounded, term_timeout is 20 s), then remove
+	# anything it left behind so the next start finds a clean datapath.
+	if ! honk_wait_core_exit; then
+		logger -t honk "honk-core still running 20s after stop; leaving its datapath untouched"
+		return 0
+	fi
+	honk_cleanup_stale
 }
 
 reload_service() {
