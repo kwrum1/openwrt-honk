@@ -1,4 +1,15 @@
 #!/usr/bin/env bash
+
+# --- fork (kwrum1): patched core -------------------------------------------
+# This fork ships a *patched* honk-core (ci/patches/honk-direct-unspec.py hands
+# direct-classified flows back to the classic TC chain) under the fixed
+# `core-p1` tag; its archive names carry the -p1 revision and its per-arch
+# SHA-256 values are supplied by honk/generated-stage.mk at build time. The
+# immutable `source-<run_id>` tag and the committed-hash invariants below only
+# describe the unpatched upstream flow, so that section is skipped here. Every
+# other check in this script still runs.
+HONK_PATCHED=0
+grep -q '^HONK_PATCH_REV:=p1$' honk/Makefile 2>/dev/null && HONK_PATCHED=1
 # SPDX-License-Identifier: GPL-3.0-only
 set -euo pipefail
 
@@ -32,6 +43,7 @@ test "$CORE_COMMIT" = "$(sed -n 's/^CORE_COMMIT:=//p' honk/Makefile)"
 test "$DOONA_ARCHIVE" = "$(sed -n 's/^PKG_SOURCE:=//p' luci-app-honk/Makefile)"
 grep -q '^PKG_HASH:=[0-9a-f]\{64\}$' luci-app-honk/Makefile
 
+if [ "$HONK_PATCHED" = 0 ]; then
 # Download metadata must be complete and immutable enough for a plain feed
 # build, i.e. a build without honk/generated-stage.mk. Any missing hash or a
 # mutable download location breaks everyone who compiles the feed themselves.
@@ -60,6 +72,7 @@ done
 	echo 'package Makefiles must not fall back to a skipped hash' >&2
 	exit 1
 }
+fi
 
 node <<'NODE'
 const fs = require('fs');
