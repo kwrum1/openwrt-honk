@@ -17,4 +17,11 @@ fi
 if [ -f /etc/honk/system.dae ] && grep -q "listen: '127.0.0.1:9527'" /etc/honk/system.dae; then
 	sed -i "s/listen: '127\.0\.0\.1:9527'/listen: '0.0.0.0:9527'/" /etc/honk/system.dae
 fi
+
+# Upstream: configuration modes are gone. Clear the legacy key only; the active
+# config and the service state are left untouched.
+legacy_mode=$(uci -q get honk.main.config_mode 2>/dev/null)
+if [ -n "$legacy_mode" ]; then
+	uci -q delete honk.main.config_mode && uci -q commit honk
+fi
 exit 0

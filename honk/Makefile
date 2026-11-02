@@ -5,7 +5,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_VERSION:=2026.11.01
+PKG_VERSION:=2026.11.02
 PKG_RELEASE:=1
 
 # Pinned honk-core revision (upstream daeuniverse/honk main), cross-compiled by
@@ -16,7 +16,7 @@ PKG_RELEASE:=1
 # keeps these archives apart from upstream's unpatched ones; they are published
 # under the fixed `core-p1` tag, and a staged run overrides URL/assets/hashes
 # through honk/generated-stage.mk (never committed).
-CORE_COMMIT:=54b2e1cfbe1e7f8a93dba3a0f64fabf2a9f88e38
+CORE_COMMIT:=ce0380dc65d1eb933da7241bf88c287231efce70
 HONK_PATCH_REV:=p1
 
 # Fixed tag holding this fork's patched core archives.
