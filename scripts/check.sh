@@ -33,6 +33,15 @@ done
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/luci/menu.d/luci-app-honk.json
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json
 
+# 跟官方仓库的 main，不跟 fork 分支。
+grep -q '^CORE_REPOSITORY=https://github.com/daeuniverse/honk.git$' ci/pins.env
+grep -q '^CORE_BRANCH=main$' ci/pins.env
+# 名字拆开避免自匹配；只扫 pin 与脚本，Doona 源码里提到这个 fork 是正常的。
+fork_owner="Glassy""iris"
+! grep -rIq "$fork_owner" ci/pins.env honk/Makefile luci-app-honk/Makefile README.md scripts .github/workflows || {
+	echo 'honk-core must track upstream daeuniverse/honk, not a fork mirror' >&2
+	exit 1
+}
 grep -q '^CORE_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_COMMIT=[0-9a-f]\{40\}$' ci/pins.env
 grep -q '^DOONA_PATCH_SHA256=[0-9a-f]\{64\}$' ci/pins.env
@@ -202,6 +211,20 @@ grep -Fq '@(x86_64||aarch64||arm)' honk/Makefile
 grep -Fq '$(INSTALL_BIN) $(CURDIR)/files/update.sh' honk/Makefile
 
 grep -Fq '+@KERNEL_DEBUG_INFO_BTF' honk/Makefile
+# 管理口自保护规则由启动时按本机地址重写，标记块与同步函数必须都在
+grep -qxF '    # honk:local-direct-begin' honk/files/config.dae
+grep -Fq 'sync_local_direct()' honk/files/control.sh
+if sed -n 's/^[[:space:]]*DEPENDS:=//p' honk/Makefile luci-app-honk/Makefile | grep -Fq '+libubox'; then
+	echo 'DEPENDS must not name libubox directly; rely on jshn instead' >&2
+	exit 1
+fi
+grep -Fq '          - "25.12"' .github/workflows/release.yml
+! grep -Fq '          - "24.10"' .github/workflows/release.yml || {
+	echo 'release.yml must not build SDK 24.10 packages: honk needs kernel 6.12+' >&2
+	exit 1
+}
+grep -Fq 'aarch64_cortex-a76' .github/workflows/release.yml
+grep -Fq 'kernel_ok' scripts/install.sh
 grep -Fq "! rg -n 'MockBackend|mockBackend|mock-backend' dist" ci/build-doona.sh
 ! grep -Fq "! rg -n 'mock backend|MockBackend|mockBackend' dist" ci/build-doona.sh
 grep -Fq 'node tools/notices.mjs "$STAGE"' ci/build-doona.sh

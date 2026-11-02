@@ -5,21 +5,21 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=honk
-PKG_VERSION:=2026.10.24
-PKG_RELEASE:=3
+PKG_VERSION:=2026.11.01
+PKG_RELEASE:=1
 
-# Pinned honk-core revision (Glassyiris/honk feat/native-api), cross-compiled by
-# ci/build-core.sh. That script also applies ci/patches/honk-direct-unspec.py:
+# Pinned honk-core revision (upstream daeuniverse/honk main), cross-compiled by
+# ci/build-core.sh. This fork also applies ci/patches/honk-direct-unspec.py:
 # direct-classified flows are handed back to the classic TC chain, so a packet
 # accelerator (dpd on x86/rockchip, the kernel flowtable on IPQ) keeps seeing
-# them while honk proxies the rest. The -p1 suffix in the asset name is the
-# patch revision and keeps these archives apart from upstream's unpatched ones;
-# they are published under the fixed `core-p1` tag. A staged run still overrides
-# URL/assets/hashes through honk/generated-stage.mk, which is never committed.
-CORE_COMMIT:=aebc0d78d567cac1cd74ee9c56674857c5441451
+# them while honk proxies the rest. The -p1 suffix is the patch revision and
+# keeps these archives apart from upstream's unpatched ones; they are published
+# under the fixed `core-p1` tag, and a staged run overrides URL/assets/hashes
+# through honk/generated-stage.mk (never committed).
+CORE_COMMIT:=54b2e1cfbe1e7f8a93dba3a0f64fabf2a9f88e38
 HONK_PATCH_REV:=p1
 
-# Immutable source asset tag holding this pin's core archives.
+# Fixed tag holding this fork's patched core archives.
 HONK_SOURCE_TAG?=core-p1
 HONK_SOURCE_URL?=https://github.com/kwrum1/openwrt-honk/releases/download/$(HONK_SOURCE_TAG)
 
@@ -62,8 +62,9 @@ define Package/honk
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
   TITLE:=Honk transparent proxy core
-  URL:=https://github.com/Glassyiris/honk
-  DEPENDS:=@(x86_64||aarch64||arm) +ca-bundle +ip-full +ubus +kmod-sched-core +kmod-sched-bpf +kmod-veth +jsonfilter +jshn +sqlite3-cli +libubox +usign +coreutils-stat +v2ray-geoip +v2ray-geosite +@KERNEL_DEBUG_INFO_BTF
+  URL:=https://github.com/daeuniverse/honk
+  # 不直接依赖 libubox：包名带 ABI 日期戳，会锁死固件；脚本只用 jshn 提供的 jshn.sh。
+  DEPENDS:=@(x86_64||aarch64||arm) +ca-bundle +ip-full +ubus +kmod-sched-core +kmod-sched-bpf +kmod-veth +jsonfilter +jshn +sqlite3-cli +usign +coreutils-stat +v2ray-geoip +v2ray-geosite +@KERNEL_DEBUG_INFO_BTF
 endef
 
 define Package/honk/description
