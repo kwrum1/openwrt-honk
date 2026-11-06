@@ -18,6 +18,25 @@ if [ -f /etc/honk/system.dae ] && grep -q "listen: '127.0.0.1:9527'" /etc/honk/s
 	sed -i "s/listen: '127\.0\.0\.1:9527'/listen: '0.0.0.0:9527'/" /etc/honk/system.dae
 fi
 
+# All DNS must go to the local SmartDNS. Stock and older conffiles send
+# non-CN queries to 8.8.8.8 through the proxy, which bypasses SmartDNS's
+# split entirely. Collapse the dns block to one upstream (127.0.0.1:53,
+# direct) with fallback default; the dip(...) rule below then sends the DoH
+# that SmartDNS itself uses through the proxy.
+if [ -f /etc/honk/config.dae ] && grep -qE '^[[:space:]]*(remote:|fallback:[[:space:]]*remote)' /etc/honk/config.dae; then
+	sed -i \
+		-e '/^[[:space:]]*remote:.*->.*proxy[[:space:]]*$/d' \
+		-e 's/^\([[:space:]]*\)fallback: remote/\1fallback: default/' \
+		-e "s|^\([[:space:]]*\)default: .*-> direct[[:space:]]*$|\1default: 'udp://127.0.0.1:53' -> direct|" \
+		/etc/honk/config.dae
+fi
+
+# The stock group has no filter, so it resolves 0 nodes even when the
+# subscription carries some. Include every node.
+if [ -f /etc/honk/config.dae ] && ! grep -q 'filter: name' /etc/honk/config.dae; then
+	sed -i "s|^\([[:space:]]*\)policy: min_moving_avg|\1policy: min_moving_avg\n\1filter: name(keyword: '')|" /etc/honk/config.dae
+fi
+
 # SmartDNS foreign DoH/bootstrap goes through the proxy. Clients use the local
 # SmartDNS; its default group is Cloudflare/Google DoH, which are unreachable
 # from a Chinese line. Honk sees the router's own traffic through its cgroup
