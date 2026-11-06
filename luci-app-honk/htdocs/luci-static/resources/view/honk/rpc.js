@@ -58,13 +58,19 @@ const callImportDae = rpc.declare({
 	expect: { '': {} }
 });
 const callConfigRead = rpc.declare({ object: 'honk', method: 'config_read', expect: { '': {} } });
-const callConfigDraftRead = rpc.declare({ object: 'honk', method: 'config_draft_read', expect: { '': {} } });
+const callConfigDraftRead = rpc.declare({
+	object: 'honk',
+	method: 'config_draft_read',
+	params: [ 'source' ],
+	expect: { '': {} }
+});
 const callLanCandidates = rpc.declare({ object: 'honk', method: 'lan_candidates', expect: { '': {} } });
 const callConfigValidate = rpc.declare({ object: 'honk', method: 'config_validate', params: [ 'content' ], expect: { '': {} } });
 const callConfigSave = rpc.declare({ object: 'honk', method: 'config_save', params: [ 'content' ], expect: { '': {} } });
 const callConfigApply = rpc.declare({ object: 'honk', method: 'config_apply', expect: { '': {} } });
-const callConfigUseManaged = rpc.declare({ object: 'honk', method: 'config_use_managed', expect: { '': {} } });
+const callConfigDetach = rpc.declare({ object: 'honk', method: 'config_detach', params: [ 'dry_run' ], expect: { '': {} } });
 const callRepair = rpc.declare({ object: 'honk', method: 'repair', expect: { '': {} } });
+const callRecover = rpc.declare({ object: 'honk', method: 'recover', expect: { '': {} } });
 const callBackup = rpc.declare({ object: 'honk', method: 'backup', expect: { '': {} } });
 const callRestore = rpc.declare({ object: 'honk', method: 'restore', expect: { '': {} } });
 const callRestorePrepare = rpc.declare({ object: 'honk', method: 'restore_prepare', expect: { '': {} } });
@@ -248,12 +254,10 @@ function tokenMessage(token) {
 		config_too_large: _('The configuration file exceeds the 2 MiB limit.'),
 		config_applied: _('Configuration applied and Honk is running.'),
 		config_apply_failed_rolled_back: _('Honk could not start with this configuration. The previous file was restored.'),
-		config_apply_rollback_failed_snapshot_retained: _('Startup failed and the automatic rollback did not finish. The snapshot was kept; run system recovery.'),
+		config_apply_rollback_failed: _('Startup failed and the automatic rollback did not finish. The snapshot was kept; run system recovery.'),
 		config_changed_concurrently: _('The configuration changed during the operation. Nothing was applied.'),
 		config_write_failed_snapshot_retained: _('Could not write the configuration. The snapshot was kept.'),
-		service_stop_unconfirmed_snapshot_retained: _('Could not confirm that Honk stopped. The operation was aborted and the snapshot was kept.'),
-		manual_mode_required: _('Manual mode is active. Restore managed mode before using the subscription tools.'),
-		managed_edit_unavailable: _('Manual mode is active, so this tool cannot edit the configuration. Select Restore managed mode first.'),
+		service_stop_unconfirmed: _('Could not confirm that Honk stopped. The operation was aborted and the snapshot was kept.'),
 		administrator_exists_reuse_credentials_or_reset_state: _('已经初始化过了，请用原来的账号登录 Doona。忘记密码：到「维护 → 重置管理员」清掉管理员记录（不动订阅和规则），再回到本页重新初始化。'),
 		administrator_setup_failed: _('创建 Doona 管理员失败，请到「维护 → 日志」查看核心日志。'),
 		invalid_credentials: _('用户名只能包含字母、数字、下划线、点、连字符（不超过 64 个字符）；密码长度必须是 8 到 128 个字符，可以包含空格。'),
@@ -271,9 +275,7 @@ function tokenMessage(token) {
 		main_config_changed_concurrently: _('操作期间 config.dae 被其他进程改动，已中止。'),
 		invalid_package_config: _('luci-app-honk 的软件包配置不完整，请重新安装。'),
 		invalid_config_path: _('配置路径不是 /etc/honk/config.dae，拒绝操作。'),
-		manual_config_valid: _('手动模式配置有效。'),
-		manual_config_invalid: _('手动模式配置无效，请先修正 config.dae。'),
-		required_system_include_missing_manual_repair: _('手动模式的配置缺少 include { system.dae }，无法修复托管设置。'),
+		required_system_include_missing: _('当前配置没有 include { system.dae }，这些设置请到「编辑配置」里修改。'),
 		native_api_setup_state_unavailable: _('读不到核心的 API 状态，请查看日志。'),
 		ui_assets_missing: _('缺少 Doona 静态文件（/usr/share/doona），请重新安装 luci-app-honk。'),
 		mock_core_start_failed: _('测试用核心启动失败：通常是内核缺 BTF（/sys/kernel/btf/vmlinux）或 eBPF 依赖模块。'),
@@ -288,7 +290,6 @@ function tokenMessage(token) {
 		setup_verification_failed: _('初始化后的自检没通过，请查看日志。'),
 		lan_ipv4_unavailable: _('选中的 LAN 网络没有 IPv4 地址。'),
 		mkdir_failed: _('创建目录失败，请检查磁盘空间与权限。'),
-		settings_unavailable_in_manual_mode: _('手动模式下这些设置由 config.dae 决定，无法保存。'),
 		settings_too_large: _('提交的设置数据过大。'),
 		invalid_settings_json: _('设置的请求格式不正确。'),
 		invalid_boolean_settings: _('开关类设置取值不合法。'),
@@ -320,7 +321,7 @@ function tokenMessage(token) {
 		subscription_empty: _('订阅内容是空的。'),
 		subscription_too_large: _('订阅内容超过 4 MiB，拒绝处理。'),
 		configuration_validation_failed: _('配置没有通过静态校验。'),
-		config_changed_concurrently_restart_failed_snapshot_retained: _('操作期间配置被改动且重启失败，快照已保留。'),
+		config_changed_concurrently_restart_failed: _('操作期间配置被改动且重启失败，快照已保留。'),
 		invalid_job_id: _('任务编号不合法。'),
 		job_id_unavailable: _('拿不到任务编号。'),
 		job_not_found: _('找不到该任务。'),
@@ -328,19 +329,24 @@ function tokenMessage(token) {
 		job_storage_unavailable: _('任务存储不可用（/tmp 空间不足？）。'),
 		prepared: _('上传目录已准备好。'),
 		probe_failed: _('预检失败，请稍后重试。'),
-		managed_switch_failed_rolled_back: _('Could not switch back to managed mode. The previous configuration was restored.'),
-		managed_switch_rollback_failed_snapshot_retained: _('Switching back to managed mode failed and the rollback did not finish. The snapshot was kept.'),
-		managed_snapshot_invalid: _('The saved managed configuration is not a valid regular file.'),
 		config_draft_missing: _('There is no saved draft to apply.'),
 		config_draft_invalid: _('The saved draft is not a valid regular file.'),
-		managed_mode_restored: _('Managed mode restored.'),
-		managed_snapshot_missing: _('There is no saved managed configuration to restore.'),
 		lan_candidates_unavailable: _('Could not read the list of network interfaces.'),
 		config_read_failed: _('Honk could not read the current configuration.'),
 		config_request_invalid: _('The configuration request is empty or invalid.'),
 		config_validation_failed: _('The configuration did not pass static validation.'),
 		config_validation_unavailable: _('The core validator did not return a result.'),
+		config_settings_owned_by_file: _('这些设置由当前配置文件决定，请到「配置 → 编辑配置」里修改。'),
+		config_detached: _('已改由面板接管，订阅和分流规则保持不变。'),
+		config_not_file_owned: _('当前配置没有自带系统设置，不需要切换。'),
+		detach_layout_unsupported: _('配置里的 global / experimental 写法无法自动拆出，请到「配置 → 编辑配置」手动删除。'),
+		detach_validation_failed: _('拆分后的配置没有通过校验，原配置未改动。'),
+		detach_failed_rolled_back: _('切换后服务没能启动，已还原原配置。'),
+		detach_rollback_failed: _('切换失败且自动还原未完成，请到「维护」执行系统恢复。'),
+		config_valid: _('配置通过校验。'),
+		config_invalid: _('配置没有通过校验。'),
 		config_saved_pending_apply: _('Configuration saved. The running service is unchanged until you apply it.'),
+		quick_add_unsupported: _('当前配置不支持快捷追加，请在「编辑配置」中修改。'),
 		config_loaded: _('Configuration loaded.'),
 		dae_loaded: _('Configuration file loaded into the editor.'),
 		upload_ready: _('Upload location ready.'),
@@ -348,6 +354,12 @@ function tokenMessage(token) {
 		upload_unavailable: _('A private upload location could not be prepared.'),
 		settings_write_failed: _('Could not save Honk settings.'),
 		curl_missing: _('The curl command is missing. Install the curl package and try again.'),
+		kernel_too_old: _('内核版本过低，honk 需要 Linux 6.12 及以上，请升级固件。'),
+		kernel_btf_override_invalid: _('HONK_VMLINUX_BTF 指向的 BTF 文件读不到。核心设了这个变量就只认它、不会回退默认路径，请改正路径或取消该变量。'),
+		kernel_btf_missing: _('内核缺少 BTF（/sys/kernel/btf/vmlinux 和 /usr/lib/debug/boot/vmlinux 都没有）。装 vmlinux-btf（apk add vmlinux-btf）或换用自带 BTF 的固件；自编译或快照内核需用同一份内核源码生成 BTF。'),
+		bpffs_not_mounted: _('bpffs 没有挂到 /sys/fs/bpf，请检查固件是否完整，或手工挂载后重试。'),
+		ip_full_missing: _('缺少 ip 命令，请安装 ip-full 包。'),
+		kmod_missing: _('缺少 modprobe 命令，请安装 kmod 包。'),
 		start_failed: _('Honk could not start.'),
 		stop_failed: _('Honk could not stop.'),
 		restart_failed: _('Honk could not restart.'),
@@ -369,6 +381,10 @@ function tokenMessage(token) {
 }
 
 function statusIssue(token) {
+	/* 内核模块检查会带上具体模块名，按前缀拆开再填进文案 */
+	if (typeof token === 'string' && token.indexOf('kernel_module_missing:') === 0)
+		return _('缺少内核模块 %s，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth / kmod-nft-queue 已安装。').format(token.slice('kernel_module_missing:'.length));
+
 	return tokenMessage(token) || _('Honk reported a system issue: %s').format(token);
 }
 
@@ -467,8 +483,9 @@ return baseclass.extend({
 	configValidate: callConfigValidate,
 	configSave: callConfigSave,
 	configApply: callConfigApply,
-	configUseManaged: callConfigUseManaged,
+	configDetach: callConfigDetach,
 	repair: callRepair,
+	recover: callRecover,
 	backup: callBackup,
 	restore: callRestore,
 	restorePrepare: callRestorePrepare,

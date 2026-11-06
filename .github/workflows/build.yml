@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Install build tools
@@ -28,7 +28,7 @@ jobs:
         run: ci/build-doona.sh
       - name: Verify pinned Doona archive hash
         run: bash scripts/check.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: honk-source-build
           path: |
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install Rust
@@ -55,7 +55,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ripgrep zstd
       - name: Build honk-core (x86_64)
         run: CORE_ARCHS=x86_64 ci/build-core.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: honk-core-x86_64
           path: artifacts/cache/honk-core-*.tar.gz

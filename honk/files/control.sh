@@ -22,13 +22,13 @@ load_settings() {
 	config_get_bool enabled main enabled 0
 	config_get_bool boot_enabled main boot_enabled 0
 	config_get_bool initialized main initialized 0
-	config_get config_mode main config_mode managed
 	config_get config_file main config_file /etc/honk/config.dae
 	config_get listen_port main listen_port 9527
 	config_get_bool clash_api_enabled main clash_api_enabled 0
 	config_get clash_api_port main clash_api_port 9090
 	config_get clash_api_secret main clash_api_secret ''
 	config_get lan_network main lan_network lan
+	settings_owner=$(config_owner "$config_file")
 }
 
 valid_clash_api() {
@@ -149,17 +149,11 @@ sync_local_direct() {
 check_config() {
 	[ "$config_file" = /etc/honk/config.dae ] || { fail "配置路径必须为 /etc/honk/config.dae"; return 1; }
 	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { fail "/etc/honk/config.dae 不是普通文件（可能被替换成软链）"; return 1; }
-	case "$config_mode" in
-		manual)
-			"$HONK_CORE" config validate --config /etc/honk/config.dae >/dev/null || { fail "手动模式的 config.dae 未通过静态校验，请先修正配置"; return 1; }
-			return 0
-			;;
-		managed) ;;
-		*) fail "配置模式取值非法（应为 managed 或 manual）"; return 1 ;;
-	esac
+	"$HONK_CORE" config validate --config /etc/honk/config.dae >/dev/null || { fail "config.dae 未通过静态校验，请先修正配置"; return 1; }
+	[ -r /usr/share/doona/index.html ] || { fail "缺少 Doona 静态文件（/usr/share/doona/index.html），请重新安装 luci-app-honk"; return 1; }
+	[ "$settings_owner" = system ] || return 0
 	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { fail "/etc/honk/system.dae 不是普通文件（可能被替换成软链）"; return 1; }
 	system_config_readonly || { fail "/etc/honk/system.dae 权限不对，应为 0600"; return 1; }
-	[ -r /usr/share/doona/index.html ] || { fail "缺少 Doona 静态文件（/usr/share/doona/index.html），请重新安装 luci-app-honk"; return 1; }
 	case "$listen_port" in
 		''|*[!0-9]*) fail "监听端口必须是数字"; return 1 ;;
 	esac
@@ -171,20 +165,41 @@ nfqueue_required() {
 	grep -qE '^[[:space:]]*nfqueue_enable:[[:space:]]*true' /etc/honk/system.dae 2>/dev/null
 }
 
+# 顺序同 honk-core：设了 HONK_VMLINUX_BTF 就只认它
+kernel_btf_path() {
+	if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
+		[ -r "$HONK_VMLINUX_BTF" ] && { printf '%s\n' "$HONK_VMLINUX_BTF"; return 0; }
+		return 1
+	fi
+	for btf_file in /sys/kernel/btf/vmlinux /usr/lib/debug/boot/vmlinux; do
+		[ -r "$btf_file" ] && { printf '%s\n' "$btf_file"; return 0; }
+	done
+	return 1
+}
+
 check_kernel() {
+	kernel_error=""
 	kernel=$(uname -r | cut -d- -f1)
 	major=$(printf '%s' "$kernel" | cut -d. -f1)
 	minor=$(printf '%s' "$kernel" | cut -d. -f2)
-	[ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 12 ]; } || { fail "内核版本过低，需要 Linux 6.12 或更新"; return 1; }
-	[ -r /sys/kernel/btf/vmlinux ] || { fail "内核缺少 BTF（/sys/kernel/btf/vmlinux），请换用带 BTF 的固件"; return 1; }
-	[ -d /sys/fs/bpf ] && grep -q ' /sys/fs/bpf bpf ' /proc/mounts || { fail "bpffs 未挂载到 /sys/fs/bpf，请检查内核或手工挂载"; return 1; }
-	command -v ip >/dev/null 2>&1 || { fail "缺少 ip 命令（装 ip-full）"; return 1; }
-	command -v modprobe >/dev/null 2>&1 || { fail "缺少 modprobe 命令（装 kmod）"; return 1; }
-	[ -r /sys/kernel/btf/vmlinux ] || { fail "内核缺少 BTF（/sys/kernel/btf/vmlinux），请换用带 BTF 的固件"; return 1; }
+	[ "$major" -gt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -ge 12 ]; } || { kernel_error=kernel_too_old; fail "内核版本过低，需要 Linux 6.12 或更新"; return 1; }
+	if ! kernel_btf_path >/dev/null; then
+		if [ -n "${HONK_VMLINUX_BTF:-}" ]; then
+			kernel_error=kernel_btf_override_invalid
+			fail "HONK_VMLINUX_BTF 指向的 $HONK_VMLINUX_BTF 不可读，honk-core 不会回退到默认路径"
+		else
+			kernel_error=kernel_btf_missing
+			fail "内核缺少 BTF（/sys/kernel/btf/vmlinux 或 /usr/lib/debug/boot/vmlinux），请安装 vmlinux-btf 或换用带 BTF 的固件"
+		fi
+		return 1
+	fi
+	[ -d /sys/fs/bpf ] && grep -q ' /sys/fs/bpf bpf ' /proc/mounts || { kernel_error=bpffs_not_mounted; fail "bpffs 未挂载到 /sys/fs/bpf，请检查内核或手工挂载"; return 1; }
+	command -v ip >/dev/null 2>&1 || { kernel_error=ip_full_missing; fail "缺少 ip 命令（装 ip-full）"; return 1; }
+	command -v modprobe >/dev/null 2>&1 || { kernel_error=kmod_missing; fail "缺少 modprobe 命令（装 kmod）"; return 1; }
 	modules="sch_ingress cls_bpf veth"
 	nfqueue_required && modules="$modules nft_queue nfnetlink_queue"
 	for module in $modules; do
-		module_available "$module" || { fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth 已安装"; return 1; }
+		module_available "$module" || { kernel_error="kernel_module_missing:$module"; fail "缺少内核模块 $module，请确认 kmod-sched-core / kmod-sched-bpf / kmod-veth 已安装"; return 1; }
 	done
 }
 
@@ -282,13 +297,14 @@ lock_owner_invalid() {
 preflight() {
 	load_settings
 	[ "$enabled" = 1 ] && [ "$initialized" = 1 ] || { fail "请先在 LuCI 里启用并完成初始化"; return 1; }
-	if [ "$config_mode" = manual ]; then
-		maintenance_start_guard && check_config && check_kernel && no_honk_resources && check_conflicts
+	# 只有 system.dae 负责这些字段时才检查 UCI 端口与网络；完整配置自行定义时不碰。
+	if [ "$settings_owner" = system ]; then
+		maintenance_start_guard && check_config && check_network && check_kernel && no_honk_resources && check_conflicts && check_port && {
+			[ "$clash_api_enabled" = 0 ] || check_port "$clash_api_port"
+		}
 		return $?
 	fi
-	maintenance_start_guard && check_config && check_network && check_kernel && no_honk_resources && check_conflicts && check_port && {
-		[ "$clash_api_enabled" = 0 ] || check_port "$clash_api_port"
-	}
+	maintenance_start_guard && check_config && check_kernel && no_honk_resources && check_conflicts
 }
 
 prepare_runtime() {
@@ -389,6 +405,21 @@ cleanup_initialize() {
 	fi
 }
 
+# 交还面板管理时也用它，保证两条路径生成的 system.dae 一致。
+render_runtime_system() {
+	printf "global {\n    wan_interface: auto\n    lan_interface: '%s'\n" "$1"
+	printf "    log_level: info\n    dial_mode: domain\n    allow_insecure: false\n"
+	printf "    auto_config_kernel_parameter: true\n    data_dir: '/etc/honk'\n"
+	printf "    store_subscribe: true\n    nfqueue_enable: true\n}\n\n"
+	printf "experimental {\n    native_api {\n        enabled: true\n        listen: '%s:%s'\n" "$2" "$3"
+	printf "        password_auth: true\n        allow_anonymous_loopback: false\n"
+	printf "        config_write: true\n        ui: '/usr/share/doona'\n    }\n"
+	if [ "$clash_api_enabled" = 1 ]; then
+		printf "    clash_api {\n        external_controller: '%s:%s'\n        external_ui: '/usr/share/honk/zashboard'\n        secret: '%s'\n        default_mode: Rule\n    }\n" "$2" "$clash_api_port" "$clash_api_secret"
+	fi
+	printf "}\n"
+}
+
 write_runtime_system() {
 	lan_device=$1
 	lan_ip=$2
@@ -398,19 +429,7 @@ write_runtime_system() {
 	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
 	[ "$current_hash" = "$system_written_hash" ] || { fail "写入运行配置时 system.dae 被其他进程改动，已中止"; return 1; }
 	temp_system=$(mktemp /etc/honk/.system.dae.XXXXXX) || return 1
-	{
-		printf "global {\n    wan_interface: auto\n    lan_interface: '%s'\n" "$lan_device"
-		printf "    log_level: info\n    dial_mode: domain\n    allow_insecure: false\n"
-		printf "    auto_config_kernel_parameter: true\n    data_dir: '/etc/honk'\n"
-		printf "    store_subscribe: true\n    nfqueue_enable: true\n}\n\n"
-		printf "experimental {\n    native_api {\n        enabled: true\n        listen: '%s:%s'\n" "$system_listen" "$system_port"
-		printf "        password_auth: true\n        allow_anonymous_loopback: false\n"
-		printf "        config_write: true\n        ui: '/usr/share/doona'\n    }\n"
-		if [ "$clash_api_enabled" = 1 ]; then
-			printf "    clash_api {\n        external_controller: '%s:%s'\n        external_ui: '/usr/share/honk/zashboard'\n        secret: '%s'\n        default_mode: Rule\n    }\n" "$system_listen" "$clash_api_port" "$clash_api_secret"
-		fi
-		printf "}\n"
-	} > "$temp_system" || { rm -f "$temp_system"; return 1; }
+	render_runtime_system "$lan_device" "$system_listen" "$system_port" > "$temp_system" || { rm -f "$temp_system"; return 1; }
 	chmod 0600 "$temp_system" || { rm -f "$temp_system"; return 1; }
 	current_hash=$(sha256sum /etc/honk/system.dae 2>/dev/null | awk '{print $1}')
 	[ "$current_hash" = "$system_written_hash" ] || { rm -f "$temp_system"; fail "写入运行配置时 system.dae 被其他进程改动，已中止"; return 1; }
@@ -462,7 +481,7 @@ settings_rollback() {
 settings() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
 	load_settings
-	[ "$config_mode" = manual ] && { echo '{"ok":false,"message":"settings_unavailable_in_manual_mode"}'; return 1; }
+	[ "$settings_owner" = system ] || { echo '{"ok":false,"message":"config_settings_owned_by_file"}'; return 1; }
 	. /usr/share/libubox/jshn.sh || { echo '{"ok":false,"message":"jshn_unavailable"}'; return 1; }
 	# Bound stdin to 64KiB (DoS protection); read one extra byte to detect truncation.
 	settings_json=$(head -c 65537)
@@ -602,13 +621,243 @@ settings() {
 	echo '{"ok":true,"message":"settings_saved"}'
 }
 
+# 把 global/experimental 摊平成「路径=值」，取值和比对共用。
+system_entries() {
+	# 逐字符扫描：大括号可以跟值写在同一行，按整行判断会把归属解析错。
+	awk '
+		function flush(stmt,   key, val, p, i, fields) {
+			gsub(/^[[:space:]]+|[[:space:]]+$/, "", stmt)
+			if (stmt == "" || d == 0) return
+			if (path[1] != "global" && path[1] != "experimental") return
+			if (stmt !~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/) return
+			# 一行写多个字段无法可靠拆分，交给调用方拒绝，不能只取第一个就当成全部。
+			fields = stmt
+			gsub(/"[^"]*"/, "", fields)
+			gsub(/\047[^\047]*\047/, "", fields)
+			if (gsub(/[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/, ":", fields) > 1) {
+				print "!unsupported"
+				return
+			}
+			key = stmt
+			sub(/[[:space:]]*:.*/, "", key)
+			val = stmt
+			sub(/^[^:]*:[[:space:]]*/, "", val)
+			if (val ~ /^\047/) { val = substr(val, 2); sub(/\047.*/, "", val) }
+			else if (val ~ /^"/) { val = substr(val, 2); sub(/".*/, "", val) }
+			p = path[1]
+			for (i = 2; i <= d; i++) p = p "." path[i]
+			print p "." key "=" val
+		}
+		{
+			line = $0
+			sub(/\r$/, "", line)
+			n = length(line)
+			for (i = 1; i <= n; i++) {
+				c = substr(line, i, 1)
+				if (quote != "") {
+					buf = buf c
+					if (c == quote) quote = ""
+					continue
+				}
+				if (c == "\047" || c == "\"") { quote = c; buf = buf c; continue }
+				if (c == "#") break
+				if (c == "{") {
+					name = buf
+					sub(/[[:space:]]*:.*/, "", name)
+					gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+					path[++d] = name
+					buf = ""
+					continue
+				}
+				if (c == "}") {
+					flush(buf)
+					buf = ""
+					if (d > 0) d--
+					continue
+				}
+				buf = buf c
+			}
+			flush(buf)
+			buf = ""
+		}
+	' "$1"
+}
+
+entry_value() {
+	awk -v key="$1" 'index($0, key "=") == 1 { print substr($0, length(key) + 2); exit }' "$2"
+}
+
+# 只删顶级 global/experimental，缺 include 时在第一块的位置补上，其余内容原样保留。
+strip_system_blocks() {
+	# 第一遍只摸底：已有 include 就不重复插入，重复 include 会被核心判成循环引用。
+	awk '
+		NR == FNR { if ($0 ~ /^[[:space:]]*include[[:space:]]*\{/) added = 1; next }
+		skip {
+			n = length($0)
+			for (i = 1; i <= n; i++) {
+				c = substr($0, i, 1)
+				if (q != "") { if (c == q) q = ""; continue }
+				if (c == "\047" || c == "\"") { q = c; continue }
+				if (c == "#") break
+				if (c == "{") depth++
+				else if (c == "}") depth--
+			}
+			if (depth <= 0) skip = 0
+			next
+		}
+		/^(global|experimental)[[:space:]]*\{/ {
+			if (!added) { print "include {\n    system.dae\n}"; added = 1 }
+			depth = gsub(/\{/, "{")
+			depth -= gsub(/\}/, "}")
+			skip = depth > 0
+			next
+		}
+		{ print }
+	' "$1" "$1"
+}
+
+device_network() {
+	. /lib/functions/network.sh
+	network_get_device dn_dev "$lan_network" && [ "$dn_dev" = "$1" ] && { echo "$lan_network"; return 0; }
+	for dn_iface in $(ubus list 'network.interface.*' 2>/dev/null | sed 's/^network\.interface\.//'); do
+		network_get_device dn_dev "$dn_iface" || continue
+		[ "$dn_dev" = "$1" ] && { echo "$dn_iface"; return 0; }
+	done
+	return 1
+}
+
+valid_port() {
+	case "$1" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$1" -ge 1024 ] && [ "$1" -le 65535 ]
+}
+
+detach_fail() {
+	echo "{\"ok\":false,\"message\":\"$1\"}"
+	return 1
+}
+
+detach_rollback() {
+	dr_ok=1
+	honk_lifecycle_stop 30 >/dev/null 2>&1 || dr_ok=0
+	cp -p "$detach_dir/old-system.dae" /etc/honk/.system.dae.rollback && mv -f /etc/honk/.system.dae.rollback /etc/honk/system.dae || dr_ok=0
+	cp -p "$detach_dir/old-config.dae" /etc/honk/.config.dae.rollback && mv -f /etc/honk/.config.dae.rollback /etc/honk/config.dae || dr_ok=0
+	{ uci import honk < "$detach_dir/old.uci" && uci commit honk && chmod 0600 /etc/config/honk; } || dr_ok=0
+	if [ "$dr_ok" = 1 ] && [ "$old_running" = 1 ]; then honk_lifecycle_start 30 || dr_ok=0; fi
+	[ "$dr_ok" = 1 ]
+}
+
+# 把文件里的 global/experimental 交还 system.dae 管理；dry_run 只返回会变动的项。
+detach() {
+	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then detach_fail update_recovery_required; return 1; fi
+	. /usr/share/libubox/jshn.sh || { detach_fail jshn_unavailable; return 1; }
+	detach_request=$(head -c 4096)
+	dry_run=
+	[ -z "$detach_request" ] || json_load "$detach_request" 2>/dev/null || { detach_fail invalid_request; return 1; }
+	[ -z "$detach_request" ] || json_get_var dry_run dry_run
+	case "$dry_run" in 1|true) dry_run=1 ;; *) dry_run=0 ;; esac
+	load_settings
+	[ "$initialized" = 1 ] || { detach_fail not_initialized; return 1; }
+	# 混合写法（include + 自带 global/experimental）也给一键切换；strip 后仍不规范会在下面被拒绝。
+	case "$settings_owner" in file|unknown) ;; *) detach_fail config_not_file_owned; return 1 ;; esac
+	[ -f /etc/honk/system.dae ] && [ ! -L /etc/honk/system.dae ] || { detach_fail system_config_unavailable; return 1; }
+	umask 077
+	detach_dir=$(mktemp -d /etc/honk/.detach.XXXXXX) || { detach_fail config_write_failed; return 1; }
+	trap 'rm -rf "$detach_dir"' 0
+	old_hash=$(sha256sum /etc/honk/config.dae | awk '{print $1}')
+	system_entries /etc/honk/config.dae > "$detach_dir/old.entries"
+	grep -q '^!unsupported$' "$detach_dir/old.entries" && { detach_fail detach_layout_unsupported; return 1; }
+
+	# 能对应到面板的值照搬，对不上的沿用面板现值。
+	file_device=$(entry_value global.lan_interface "$detach_dir/old.entries")
+	if [ -n "$file_device" ] && detach_network=$(device_network "$file_device"); then lan_network=$detach_network; fi
+	file_port=$(entry_value experimental.native_api.listen "$detach_dir/old.entries")
+	file_port=${file_port##*:}
+	valid_port "$file_port" && listen_port=$file_port
+	old_clash_port=$clash_api_port
+	old_clash_secret=$clash_api_secret
+	clash_api_enabled=0
+	if grep -q '^experimental\.clash_api\.' "$detach_dir/old.entries"; then
+		clash_api_enabled=1
+		file_clash=$(entry_value experimental.clash_api.external_controller "$detach_dir/old.entries")
+		clash_api_port=${file_clash##*:}
+		clash_api_secret=$(entry_value experimental.clash_api.secret "$detach_dir/old.entries")
+		valid_clash_api || { clash_api_enabled=0; clash_api_port=$old_clash_port; clash_api_secret=$old_clash_secret; }
+	fi
+	check_network && network_settings || { detach_fail lan_network_unavailable; return 1; }
+
+	render_runtime_system "$lan_device" "$lan_ip" "$listen_port" > "$detach_dir/system.dae" || { detach_fail config_write_failed; return 1; }
+	strip_system_blocks /etc/honk/config.dae > "$detach_dir/config.dae" || { detach_fail config_write_failed; return 1; }
+	[ "$(config_owner "$detach_dir/config.dae")" = system ] || { detach_fail detach_layout_unsupported; return 1; }
+	detach_check=$("$HONK_CORE" config validate --config "$detach_dir/config.dae" 2>/dev/null)
+	[ "$(printf '%s' "$detach_check" | jsonfilter -e '@.ok' 2>/dev/null)" = true ] || { detach_fail detach_validation_failed; return 1; }
+
+	if [ "$dry_run" = 1 ]; then
+		system_entries "$detach_dir/system.dae" > "$detach_dir/new.entries"
+		json_init
+		json_add_boolean ok 1
+		json_add_string message detach_preview
+		json_add_string lan_network "$lan_network"
+		json_add_int listen_port "$listen_port"
+		json_add_boolean clash_api_enabled "$clash_api_enabled"
+		json_add_int clash_api_port "$clash_api_port"
+		json_add_array changes
+		awk '
+			{ i = index($0, "="); k = substr($0, 1, i - 1); v = substr($0, i + 1) }
+			NR == FNR { seen[k] = 1; val[k] = v; next }
+			k ~ /\.secret$/ { if (!seen[k]) print k "\t***\t"; else if (val[k] != v) print k "\t***\t***"; next }
+			!seen[k] { print k "\t" v "\t"; next }
+			val[k] != v { print k "\t" v "\t" val[k] }
+		' "$detach_dir/new.entries" "$detach_dir/old.entries" > "$detach_dir/changes"
+		while IFS='	' read -r change_key change_old change_new; do
+			json_add_object ""
+			json_add_string key "$change_key"
+			json_add_string old "$change_old"
+			json_add_string new "$change_new"
+			json_close_object
+		done < "$detach_dir/changes"
+		json_close_array
+		json_dump
+		return 0
+	fi
+
+	honk_lock_acquire || { detach_fail operation_in_progress; return 1; }
+	trap 'honk_lock_release >/dev/null 2>&1; rm -rf "$detach_dir"' 0
+	[ "$(sha256sum /etc/honk/config.dae | awk '{print $1}')" = "$old_hash" ] || { detach_fail config_changed_concurrently; return 1; }
+	old_running=0
+	if managed_core_pid >/dev/null 2>&1; then
+		old_running=1
+	elif pidof honk-core >/dev/null 2>&1; then
+		detach_fail unmanaged_core_running
+		return 1
+	fi
+	cp -p /etc/honk/config.dae "$detach_dir/old-config.dae" && cp -p /etc/honk/system.dae "$detach_dir/old-system.dae" && uci export honk > "$detach_dir/old.uci" || { detach_fail config_write_failed; return 1; }
+	cp -p /etc/honk/config.dae /etc/honk/.config-before-detach.tmp && mv -f /etc/honk/.config-before-detach.tmp /etc/honk/config-before-detach.dae || { detach_fail config_write_failed; return 1; }
+	if [ "$old_running" = 1 ]; then honk_lifecycle_stop 30 || { detach_fail service_stop_unconfirmed; return 1; }; fi
+	chmod 0600 "$detach_dir/system.dae" "$detach_dir/config.dae"
+	if ! { cp -p "$detach_dir/system.dae" /etc/honk/.system.dae.detach && mv -f /etc/honk/.system.dae.detach /etc/honk/system.dae && \
+		cp -p "$detach_dir/config.dae" /etc/honk/.config.dae.detach && mv -f /etc/honk/.config.dae.detach /etc/honk/config.dae && \
+		uci set "honk.main.lan_network=$lan_network" && uci set "honk.main.listen_port=$listen_port" && \
+		uci set "honk.main.clash_api_enabled=$clash_api_enabled" && uci set "honk.main.clash_api_port=$clash_api_port" && \
+		uci set "honk.main.clash_api_secret=$clash_api_secret" && uci commit honk && chmod 0600 /etc/config/honk; } || \
+		{ [ "$old_running" = 1 ] && ! honk_lifecycle_start 30; }; then
+		if detach_rollback; then detach_fail detach_failed_rolled_back; else logger -t honk "detach rollback failed; snapshot kept at $detach_dir"; trap 'honk_lock_release >/dev/null 2>&1' 0; detach_fail detach_rollback_failed; fi
+		return 1
+	fi
+	# 草稿原本就是旧配置时跟着换，免得配置页一直提示「有未应用的草稿」。
+	if [ -f /etc/honk/config-draft.dae ] && [ "$(sha256sum /etc/honk/config-draft.dae | awk '{print $1}')" = "$old_hash" ]; then
+		cp -p /etc/honk/config.dae /etc/honk/.config-draft.detach && mv -f /etc/honk/.config-draft.detach /etc/honk/config-draft.dae
+	fi
+	echo '{"ok":true,"message":"config_detached"}'
+}
+
 diagnose() {
 	load_settings
 	errors=""
 	managed_core_pid >/dev/null 2>&1 && running=1 || running=0
 	check_config >/dev/null 2>&1 || errors="$errors invalid_package_config"
-	check_kernel >/dev/null 2>&1 || errors="$errors kernel_requirements_unmet"
-	if [ "$config_mode" = manual ]; then
+	# 内核检查自报具体缺哪项，面板才能给出可操作的提示
+	check_kernel >/dev/null 2>&1 || errors="$errors ${kernel_error:-kernel_requirements_unmet}"
+	if [ "$settings_owner" != system ]; then
 		if [ "$running" != 1 ]; then
 			no_honk_resources >/dev/null 2>&1 || errors="$errors honk_resources_occupied"
 			pidof honk-core >/dev/null 2>&1 && errors="$errors unmanaged_core_running"
@@ -667,9 +916,9 @@ clash_system_matches() {
 repair() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then echo '{"ok":false,"message":"update_recovery_required"}'; return 1; fi
 	load_settings
-	if [ "$config_mode" = manual ]; then
-		check_config && { echo '{"ok":true,"message":"manual_config_valid"}'; return 0; }
-		echo '{"ok":false,"message":"manual_config_invalid"}'
+	if [ "$settings_owner" != system ]; then
+		check_config && { echo '{"ok":true,"message":"config_valid"}'; return 0; }
+		echo '{"ok":false,"message":"config_invalid"}'
 		return 1
 	fi
 	old_network=$lan_network
@@ -683,7 +932,7 @@ repair() {
 	[ "$config_file" = /etc/honk/config.dae ] || { echo '{"ok":false,"message":"invalid_config_path"}'; return 1; }
 	[ -f /etc/honk/config.dae ] && [ ! -L /etc/honk/config.dae ] || { echo '{"ok":false,"message":"main_config_unavailable"}'; return 1; }
 	main_hash=$(sha256sum /etc/honk/config.dae | awk '{print $1}')
-	main_has_system_include || { echo '{"ok":false,"message":"required_system_include_missing_manual_repair"}'; return 1; }
+	main_has_system_include || { echo '{"ok":false,"message":"required_system_include_missing"}'; return 1; }
 	valid_network_name || { echo '{"ok":false,"message":"invalid_lan_network"}'; return 1; }
 	case "$listen_port" in ''|*[!0-9]*) echo '{"ok":false,"message":"invalid_listen_port"}'; return 1 ;; esac
 	[ "$listen_port" -ge 1024 ] && [ "$listen_port" -le 65535 ] || { echo '{"ok":false,"message":"invalid_listen_port"}'; return 1; }
@@ -962,6 +1211,35 @@ EOF
 	echo '{"ok":true,"message":"administrator_initialized"}'
 }
 
+# 收尾被中断的维护事务：死锁优先清，再交给 maintenance.sh 回滚日志。
+# 只在确认没有 honk-core 在跑时动手，避免清掉别人正在用的锁。
+recover() {
+	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then
+		echo '{"ok":false,"message":"update_recovery_required"}'
+		return 1
+	fi
+	if [ -d "$HONK_LOCK_DIR" ]; then
+		lock_readable=0
+		[ -r "$HONK_LOCK_DIR/pid" ] && lock_readable=1
+		if [ "$lock_readable" = 1 ] && ! honk_lock_is_stale; then
+			echo '{"ok":false,"message":"operation_in_progress"}'
+			return 1
+		fi
+		if pidof honk-core >/dev/null 2>&1; then
+			echo '{"ok":false,"message":"unmanaged_core_running"}'
+			return 1
+		fi
+		rm -rf "$HONK_LOCK_DIR" || { echo '{"ok":false,"message":"lock_clear_failed"}'; return 1; }
+	fi
+	if [ -d /etc/.honk-maintenance ]; then
+		if ! maint_out=$(/usr/share/honk/maintenance.sh recover 2>/dev/null); then
+			echo "${maint_out:-{\"ok\":false,\"message\":\"recovery_failed\"}}"
+			return 1
+		fi
+	fi
+	echo '{"ok":true,"message":"transaction_recovered"}'
+}
+
 case "$1" in
 	check)
 		preflight
@@ -985,8 +1263,14 @@ case "$1" in
 	repair)
 		repair
 		;;
+	detach)
+		detach
+		;;
+	recover)
+		recover
+		;;
 	*)
-		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair}" >&2
+		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair|detach|recover}" >&2
 		exit 2
 		;;
 esac

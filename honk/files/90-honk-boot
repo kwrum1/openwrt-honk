@@ -17,4 +17,24 @@ fi
 if [ -f /etc/honk/system.dae ] && grep -q "listen: '127.0.0.1:9527'" /etc/honk/system.dae; then
 	sed -i "s/listen: '127\.0\.0\.1:9527'/listen: '0.0.0.0:9527'/" /etc/honk/system.dae
 fi
+
+# Force NFQUEUE off, unconditionally.
+#
+# This image does not ship nft_queue / nfnetlink_queue (the TCX datapath does
+# not use them), but /etc/honk/system.dae is a conffile: a keep-settings
+# upgrade keeps the old `nfqueue_enable: true`, and the packaged
+# control.sh/maintenance.sh rewrite the flag back to true. Either one makes
+# honk's preflight refuse to start ("缺少内核模块 nft_queue"). Sed all three
+# here; the packaged files are also patched at build time, this is the
+# upgrade-time safety net.
+for f in /etc/honk/system.dae /usr/share/honk/control.sh /usr/share/honk/maintenance.sh; do
+	[ -f "$f" ] && sed -i 's/nfqueue_enable: true/nfqueue_enable: false/g' "$f"
+done
+
+# 配置模式已取消：只清遗留键，活动配置与启停状态一概不动。
+legacy_mode=$(uci -q get honk.main.config_mode 2>/dev/null)
+if [ -n "$legacy_mode" ]; then
+	uci -q delete honk.main.config_mode && uci -q commit honk
+fi
+
 exit 0

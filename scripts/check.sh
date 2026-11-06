@@ -115,7 +115,7 @@ const fs = require('fs');
 const rpcSource = fs.readFileSync('luci-app-honk/htdocs/luci-static/resources/view/honk/rpc.js', 'utf8');
 const backend = fs.readFileSync('luci-app-honk/root/usr/libexec/rpcd/honk', 'utf8');
 const acl = JSON.parse(fs.readFileSync('luci-app-honk/root/usr/share/rpcd/acl.d/luci-app-honk.json', 'utf8'))['luci-app-honk'];
-const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'add_subscription', 'probe_subscription', 'add_nodes', 'import_dae', 'config_read', 'config_draft_read', 'lan_candidates', 'config_validate', 'config_save', 'config_apply', 'config_use_managed', 'reset_admin', 'repair', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply'];
+const expected = ['status', 'check', 'initialize', 'start', 'stop', 'restart', 'settings', 'add_subscription', 'probe_subscription', 'add_nodes', 'import_dae', 'config_read', 'config_draft_read', 'lan_candidates', 'config_validate', 'config_save', 'config_apply', 'config_detach', 'reset_admin', 'repair', 'recover', 'backup', 'restore', 'restore_prepare', 'reset', 'job_status', 'logs', 'update_check', 'update_apply'];
 const frontend = [...rpcSource.matchAll(/method:\s*'([^']+)'/g)].map(match => match[1]);
 const list = backend.match(/echo '([^']+)'/);
 if (!list) throw new Error('RPC backend has no list method declaration');
@@ -197,7 +197,10 @@ rm -rf "$reset_fixture"
 
 grep -Fq 'include $(INCLUDE_DIR)/package.mk' luci-app-honk/Makefile
 grep -Fq '$(eval $(call BuildPackage,luci-app-honk))' luci-app-honk/Makefile
-! grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' luci-app-honk/Makefile
+! grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' luci-app-honk/Makefile || {
+	echo 'luci-app-honk must not include the stock luci.mk' >&2
+	exit 1
+}
 grep -Fq 'PKG_BUILD_DEPENDS:=luci-base/host' luci-app-honk/Makefile
 grep -Fq 'po2lmo ./po/zh-cn/honk.po' luci-app-honk/Makefile
 grep -Fq '$(INSTALL_DATA) $(PKG_BUILD_DIR)/honk.zh-cn.lmo' luci-app-honk/Makefile
@@ -210,7 +213,15 @@ grep -Fq 'HONK_ASSET_ARMV7?=' honk/Makefile
 grep -Fq '@(x86_64||aarch64||arm)' honk/Makefile
 grep -Fq '$(INSTALL_BIN) $(CURDIR)/files/update.sh' honk/Makefile
 
-grep -Fq '+@KERNEL_DEBUG_INFO_BTF' honk/Makefile
+! grep -v '^[[:space:]]*#' honk/Makefile | grep -Fq '@KERNEL_DEBUG_INFO_BTF' || {
+	echo 'honk must not gate on @KERNEL_DEBUG_INFO_BTF; vmlinux-btf covers BTF-less kernels' >&2
+	exit 1
+}
+for script in honk/files/control.sh honk/files/update.sh; do
+	grep -Fq '/sys/kernel/btf/vmlinux' "$script"
+	grep -Fq '/usr/lib/debug/boot/vmlinux' "$script"
+	grep -Fq 'HONK_VMLINUX_BTF' "$script"
+done
 # 管理口自保护规则由启动时按本机地址重写，标记块与同步函数必须都在
 grep -qxF '    # honk:local-direct-begin' honk/files/config.dae
 grep -Fq 'sync_local_direct()' honk/files/control.sh

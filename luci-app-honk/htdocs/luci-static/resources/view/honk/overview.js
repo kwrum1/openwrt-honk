@@ -3,6 +3,7 @@
 'use strict';
 'require network';
 'require poll';
+'require ui';
 'require view';
 'require view.honk.rpc as honk';
 'require uci';
@@ -230,15 +231,13 @@ return view.extend({
 			clashPortInput.value = status.clash_api_port ? String(status.clash_api_port) : '9090';
 
 			card.appendChild(E('h3', { 'class': 'honk-card-title' }, _('Service settings')));
-			/* Manual mode owns the whole runtime from config.dae, so the backend
-			   rejects these settings. Disable them here instead of failing on save. */
-			const manualMode = status.config_mode === 'manual';
-			if (manualMode) {
+			/* 字段归属由当前配置决定，非 system.dae 提供时这些设置只读。 */
+			const owner = status.settings_owner || 'unknown';
+			if (owner !== 'system') {
 				[ networkSelect, portInput, clashEnabledInput, clashPortInput, clashSecretInput ].forEach(function(input) {
 					input.disabled = true;
 				});
 				save.disabled = true;
-				card.appendChild(E('p', { 'class': 'honk-note honk-mode-hint' }, _('Manual mode: these settings belong to config.dae, so they are read-only here. Restore managed mode on the Configuration page to change them.')));
 			}
 			if (!(data.networks || []).length)
 				networkSelect.appendChild(E('option', { 'value': '' }, _('No network interfaces found')));
@@ -248,7 +247,16 @@ return view.extend({
 			form.appendChild(field(_('Clash API port'), clashPortInput));
 			form.appendChild(field(_('Clash API secret'), clashSecretInput, status.clash_api_secret_set ? _('A secret is set. Leave blank to keep it.') : _('Required when enabling. Use 6–128 letters, numbers, dots, underscores or hyphens.')));
 			form.appendChild(E('p', { 'class': 'honk-note' }, _('Use your existing HTTPS reverse proxy for external access. Enter the secret in Zashboard when connecting.')));
-			form.appendChild(E('div', { 'class': 'cbi-page-actions' }, save));
+			if (owner === 'system') {
+				form.appendChild(E('div', { 'class': 'cbi-page-actions' }, [ save ]));
+			} else {
+				/* 写法不规范时后端拒绝猜归属，这里必须给一键切换，否则页面成死胡同。 */
+				if (owner === 'unknown')
+					form.appendChild(E('p', { 'class': 'honk-note' }, _('This file includes system.dae and also defines global/experimental itself, so the panel will not guess. Switching moves these settings here; the current file is backed up first.')));
+				const detach = E('button', { 'class': 'cbi-button cbi-button-action', 'type': 'button' }, _('Switch to panel management'));
+				detach.addEventListener('click', function() { detachSettings(detach); });
+				form.appendChild(E('div', { 'class': 'honk-actions' }, [ detach ]));
+			}
 			form.appendChild(message);
 			form.addEventListener('submit', function(ev) {
 				ev.preventDefault();
@@ -292,6 +300,77 @@ return view.extend({
 			});
 			card.appendChild(form);
 			return card;
+		}
+
+		/* 先预览会变动的项，确认后才真正改写。 */
+		function detachSettings(button) {
+			button.disabled = true;
+			settingsBusy = true;
+			actionMessage.textContent = _('Checking the configuration…');
+			honk.configDetach(true).then(honk.ensureOk).then(function(preview) {
+				actionMessage.textContent = '';
+				return confirmDetach(preview);
+			}).then(function(confirmed) {
+				if (!confirmed)
+					return;
+				actionMessage.textContent = _('Switching to panel management…');
+				return honk.configDetach(false).then(honk.ensureOk).then(function(result) {
+					actionMessage.textContent = honk.resultMessage(result, _('The panel manages these settings now.'));
+				});
+			}).catch(function(error) {
+				actionMessage.textContent = honk.errorMessage(error, _('The switch failed. The configuration was left unchanged.'));
+			}).finally(function() {
+				settingsBusy = false;
+				button.disabled = false;
+				refresh();
+			});
+		}
+
+		function confirmDetach(preview) {
+			/* 面板能映射的项与它固定写死的项分开列，避免把「会被默认值覆盖」说成「不支持」。 */
+			const mapped = {
+				'global.lan_interface': _('LAN network'),
+				'experimental.native_api.listen': _('Doona listen address'),
+				'experimental.clash_api.external_controller': _('Clash API address')
+			};
+			const carried = [];
+			const replaced = [];
+			(preview.changes || []).forEach(function(item) {
+				if (/\.secret$/.test(item.key))
+					return;
+				const label = mapped[item.key];
+				if (label)
+					carried.push(E('li', {}, '%s：%s → %s'.format(label, item.old, item.new)));
+				else if (!item.new)
+					replaced.push(E('li', {}, _('%s: %s (removed)').format(item.key, item.old)));
+				else
+					replaced.push(E('li', {}, '%s：%s → %s'.format(item.key, item.old, item.new)));
+			});
+			const summary = _('LAN network %s, port %s, Clash API %s.').format(preview.lan_network, preview.listen_port,
+				preview.clash_api_enabled ? _('enabled on port %s').format(preview.clash_api_port) : _('disabled'));
+			return new Promise(function(resolve) {
+				ui.showModal(_('Switch to panel management'), [
+					E('p', {}, _('These settings move to this page. Subscriptions, nodes, groups and routing rules stay as they are.')),
+					E('p', {}, summary),
+					carried.length ? E('div', {}, [ E('p', {}, _('These values carry over, written the way the panel expects:')), E('ul', {}, carried) ]) : '',
+					replaced.length ? E('div', {}, [ E('p', {}, _('These items have no panel setting, so the panel defaults replace them:')), E('ul', {}, replaced) ]) : '',
+					E('p', { 'class': 'honk-note' }, _('Honk restarts during the switch.')),
+					E('p', { 'class': 'honk-note' }, _('The current file is backed up. To undo, load it again from the Configuration page and apply it.')),
+					E('div', { 'class': 'right' }, [
+						E('button', { 'class': 'cbi-button', 'click': function(ev) {
+							ev.preventDefault();
+							ui.hideModal();
+							resolve(false);
+						} }, [ _('Cancel') ]),
+						' ',
+						E('button', { 'class': 'cbi-button cbi-button-positive', 'click': function(ev) {
+							ev.preventDefault();
+							ui.hideModal();
+							resolve(true);
+						} }, [ _('Switch to panel management') ])
+					])
+				]);
+			});
 		}
 
 		function renderSetup(status) {
@@ -409,8 +488,11 @@ return view.extend({
 		}
 
 		page.appendChild(E('div', { 'class': 'honk-header' }, [
-			E('h2', {}, _('Honk')),
-			E('p', { 'class': 'honk-header-sub' }, _('Transparent proxy core for OpenWrt. Start, stop and manage the Honk service.'))
+			E('img', { 'class': 'honk-header-logo', 'src': L.resource('view/honk/logo.png'), 'alt': '' }),
+			E('div', { 'class': 'honk-header-text' }, [
+				E('h2', {}, _('Honk')),
+				E('p', { 'class': 'honk-header-sub' }, _('Transparent proxy core for OpenWrt. Start, stop and manage the Honk service.'))
+			])
 		]));
 		page.appendChild(statusArea);
 		page.appendChild(actionMessage);
