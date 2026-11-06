@@ -18,6 +18,16 @@ if [ -f /etc/honk/system.dae ] && grep -q "listen: '127.0.0.1:9527'" /etc/honk/s
 	sed -i "s/listen: '127\.0\.0\.1:9527'/listen: '0.0.0.0:9527'/" /etc/honk/system.dae
 fi
 
+# SmartDNS foreign DoH/bootstrap goes through the proxy. Clients use the local
+# SmartDNS; its default group is Cloudflare/Google DoH, which are unreachable
+# from a Chinese line. Honk sees the router's own traffic through its cgroup
+# hooks, so routing these destination IPs to the proxy makes the foreign half
+# of the split resolve without any smartdns-side proxy knowledge. CN domains
+# stay on the domestic DoH and are routed direct by the rule below.
+if [ -f /etc/honk/config.dae ] && ! grep -q 'ebpf: doh-proxy' /etc/honk/config.dae; then
+	sed -i 's|^\([[:space:]]*\)domain(geosite: cn) -> direct|\1# ebpf: doh-proxy -- smartdns foreign DoH/bootstrap via the proxy\n\1dip(1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4, 9.9.9.9, 149.112.112.112, 94.140.14.14, 94.140.15.15, 208.67.222.222, 208.67.220.220) -> proxy\n\1domain(geosite: cn) -> direct|' /etc/honk/config.dae
+fi
+
 # Force NFQUEUE off, unconditionally.
 #
 # This image does not ship nft_queue / nfnetlink_queue (the TCX datapath does
