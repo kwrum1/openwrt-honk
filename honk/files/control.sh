@@ -1240,6 +1240,30 @@ recover() {
 	echo '{"ok":true,"message":"transaction_recovered"}'
 }
 
+# 启动时自动收尾被中断的维护事务。只在没有任何在途操作时动手：
+#   * HONK_MAINT_CAP 由 maintenance.sh 在恢复/回滚过程中导出，不能抢；
+#   * 签名更新（/etc/.honk-update）需要重装完整包集，不能自动回滚；
+#   * 活锁 / 非托管 honk-core 说明还有人在用，保持原状让 UI 报错。
+# 回滚本身不启动服务（HONK_RECOVER_NO_START=1），由调用方继续正常的启动流程，
+# 避免 start_service -> recover -> start_service 的递归。
+auto_recover() {
+	[ -n "${HONK_MAINT_CAP:-}" ] && return 0
+	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then
+		return 0
+	fi
+	if [ ! -d "$HONK_LOCK_DIR" ] && [ ! -e "$HONK_MAINT_JOURNAL" ] && [ ! -L "$HONK_MAINT_JOURNAL" ]; then
+		return 0
+	fi
+	if [ -d "$HONK_LOCK_DIR" ]; then
+		[ -r "$HONK_LOCK_DIR/pid" ] || return 1
+		honk_lock_is_stale || return 1
+	fi
+	pidof honk-core >/dev/null 2>&1 && return 1
+	logger -t honk "recovering interrupted maintenance transaction" 2>/dev/null || :
+	rm -rf "$HONK_LOCK_DIR" 2>/dev/null || :
+	HONK_RECOVER_NO_START=1 /usr/share/honk/maintenance.sh recover >/dev/null 2>&1
+}
+
 case "$1" in
 	check)
 		preflight
@@ -1269,8 +1293,11 @@ case "$1" in
 	recover)
 		recover
 		;;
+	auto-recover)
+		auto_recover
+		;;
 	*)
-		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair|detach|recover}" >&2
+		echo "usage: $0 {check|diagnose|preflight|local-direct|initialize|settings|repair|detach|recover|auto-recover}" >&2
 		exit 2
 		;;
 esac

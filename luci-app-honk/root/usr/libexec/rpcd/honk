@@ -846,6 +846,12 @@ is_managed_core() {
 
 begin_mutation() {
 	if [ -e /etc/.honk-update/journal ] || [ -L /etc/.honk-update/journal ]; then emit_result false update_recovery_required; exit 1; fi
+	# A power loss or a killed UI job can leave a maintenance journal behind.
+	# Recover it before taking the lock, otherwise preflight refuses every start
+	# and the status page stays on "recovery required" until the button is used.
+	if [ -e /etc/.honk-maintenance/journal ] || [ -L /etc/.honk-maintenance/journal ]; then
+		"$CONTROL" auto-recover >/dev/null 2>&1 || :
+	fi
 	# A caller that timed out mid-operation cannot release the lock itself. Without
 	# this, one aborted apply wedges every later configuration operation.
 	if honk_lock_is_stale; then rm -rf "$HONK_LOCK_DIR"; fi

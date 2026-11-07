@@ -106,8 +106,14 @@ issue_capability() {
 	chmod 0600 "$cap_tmp" || { rm -f "$cap_tmp"; return 1; }
 	mv -f "$cap_tmp" "$CAPABILITY" || { rm -f "$cap_tmp"; return 1; }
 	export HONK_MAINT_CAP=$cap_nonce
-	honk_lifecycle_start 30
-	cap_start_rc=$?
+	if [ "${HONK_RECOVER_NO_START:-0}" = 1 ]; then
+		# Boot-time auto-recovery: the caller (init start_service) continues the
+		# normal start, so do not start a nested procd instance here.
+		cap_start_rc=0
+	else
+		honk_lifecycle_start 30
+		cap_start_rc=$?
+	fi
 	unset HONK_MAINT_CAP
 	return "$cap_start_rc"
 }
@@ -190,6 +196,13 @@ journal_value() {
 	sed -n "s/^$1=//p" "$JOURNAL" 2>/dev/null
 }
 
+# During boot-time auto-recovery the caller continues the normal start, so the
+# rollback must not start a nested procd instance (HONK_RECOVER_NO_START=1).
+recover_start() {
+	[ "${HONK_RECOVER_NO_START:-0}" = 1 ] && return 0
+	honk_lifecycle_start 30
+}
+
 recover_transaction() {
 	[ -e "$TXN_DIR" ] || { journal_active=0; return 0; }
 	[ -d "$TXN_DIR" ] && [ ! -L "$TXN_DIR" ] && [ -f "$JOURNAL" ] && [ ! -L "$JOURNAL" ] || return 1
@@ -220,7 +233,7 @@ recover_transaction() {
 		journal_active=0
 		swap_started=0
 		if [ "$journal_operation" = backup ] && [ "$old_running" = 1 ]; then
-			honk_lifecycle_start 30 || return 1
+			recover_start || return 1
 		fi
 		service_stopped=0
 		return 0
@@ -251,7 +264,7 @@ recover_transaction() {
 				# A backup never changes the live tree; clear its journal before normal startup.
 				rm -rf "$TXN_DIR" || return 1
 				journal_active=0
-				honk_lifecycle_start 30 || return 1
+				recover_start || return 1
 			fi
 		fi
 	else

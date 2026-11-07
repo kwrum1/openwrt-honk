@@ -17,6 +17,14 @@ boot() {
 
 start_service() {
 	local enabled initialized config_file ready_token ready_hash ready_runtime ready_api_enabled ready_api_listen ready_clash_api_listen ready_clash_api_secret_set old_ready_token
+	# 掉电或 UI 任务被杀会留下 /etc/.honk-maintenance/journal。必须在
+	# enabled/initialized 判断之前收尾：中断的 restore/reset 可能把 enabled 写回 0，
+	# 那样服务永远起不来，状态页也就一直卡在“需要恢复系统”。
+	if ! "$HONK_CONTROL" auto-recover >/dev/null 2>&1; then
+		if [ -e /etc/.honk-maintenance/journal ] || [ -L /etc/.honk-maintenance/journal ]; then
+			logger -t honk "interrupted maintenance transaction still needs manual recovery"
+		fi
+	fi
 	config_load honk
 	config_get_bool enabled main enabled 0
 	config_get_bool initialized main initialized 0
